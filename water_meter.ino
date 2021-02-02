@@ -118,6 +118,7 @@ void clear_eeprom() {
 	last_reported = cur_pct;
      }
   }
+  tick_count = cur_eeprom_offset = 0;
 }
 
 void initOled() {
