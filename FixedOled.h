@@ -58,6 +58,8 @@ class OLED:public Print
     void  setFont(char * font);
     void  fillRect(byte w, byte h, byte fill);
 		virtual void write(uint8_t value);
+    byte get_cx() { return cx; }
+    byte get_cy() { return cy; }
     
 	protected:
 		byte 	cx,cy;
@@ -69,6 +71,5 @@ class OLED:public Print
 };
 
 extern char * SmallFont;
-extern char BigNumbers[];
 
 #endif

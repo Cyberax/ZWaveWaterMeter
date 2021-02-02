@@ -12,11 +12,14 @@
 #define NUM_DEBOUNCE 3
 
 // The meter is connected to PIN 18
-#define PIN_TICK 18
+#define PIN_TICK 21
 
 // A couple of utility pins
 #define RST_PIN 22
 #define OLED_READOUT_PIN 20
+#define OLED_COUNTS_TO_SHINE 10000 // 200 seconds
+
+ZUNO_DISABLE(SERVICE_LEDS); // Disable Service LEDs to save battry and remove unwanted blinks
 
 // On-demand display
 OLED oled;
@@ -41,6 +44,9 @@ unsigned long last_report_millis = 0;
 ZUNO_SETUP_CHANNELS(ZUNO_METER(ZUNO_METER_TYPE_WATER, METER_RESET_DISABLE, 
     ZUNO_METER_WATER_SCALE_GALLONS, METER_SIZE_FOUR_BYTES, METER_PRECISION_ONE_DECIMAL, getter, NULL));
 
+ZUNO_SETUP_CFGPARAMETER_HANDLER(tick_value_push);
+
+
 void write_to_eeprom() {
   unsigned long buf[3];
   buf[0] = buf[1] = buf[2] = tick_count;
@@ -52,7 +58,7 @@ void write_to_eeprom() {
   }
 }
 
-unsigned long read_entry(unsigned int idx) {
+unsigned long read_entry(unsigned long idx) {
   unsigned long buf[3];
   EEPROM.get(EEPROM_ADDR + idx*sizeof(buf), buf, sizeof(buf)); 
   unsigned long v1 = buf[0], v2 = buf[1], v3 = buf[2];
@@ -101,7 +107,7 @@ void clear_eeprom() {
   oled.clrscr();
   oled.gotoXY(0,1);
   oled.println("CLEARING EEPROM");
-  for(unsigned int i = 0; i < EEPROM_RING_SIZE_ENTRIES; i++) {
+  for(unsigned long i = 0; i < EEPROM_RING_SIZE_ENTRIES; i++) {
      EEPROM.put(EEPROM_ADDR + i*sizeof(buf), buf, sizeof(buf));
      
      unsigned long cur_pct = (i*100/EEPROM_RING_SIZE_ENTRIES);
@@ -169,16 +175,35 @@ void enable_oled_readout() {
     initOled();
     printMeter();
   }
-  oled_counts_left = 1000;
+  oled_counts_left = OLED_COUNTS_TO_SHINE;
+}
+
+void clear_rest_of_line() {
+  while(oled.get_cx() != 0) {
+    oled.print(" ");
+  }
 }
 
 void printMeter() {
   oled.gotoXY(0,1);
-  oled.println("      GALLONS");
-  oled.println("");
+  oled.print(" gal: ");
   oled.print(tick_count/10);  
   oled.print(".");
   oled.print(tick_count%10);
+  clear_rest_of_line();
+  oled.println("");
+
+  double cf3 = double(0.133680556) * (tick_count / 10.0);
+  oled.print("cf^3: ");
+  oled.print(cf3);
+  clear_rest_of_line();
+  oled.println("");
+
+  double m3 = double(0.00378541178) * (tick_count / 10.0);
+  oled.print(" m^3: ");
+  oled.print(m3);
+  clear_rest_of_line();
+  oled.println("");
 }
 
 void loop() {
@@ -227,4 +252,20 @@ void loop() {
 
 unsigned long getter(void) {
   return tick_count;
+}
+
+unsigned long uncommitted;
+void tick_value_push(byte param, word value) {
+  if (param == 65) { 
+    // The second user-defined parameter is used to control the upper word of the counter
+    uncommitted = ((unsigned long)value) << 16;
+  }
+  if (param == 66) {
+    // The lower user-defined parameter is used to control the lower word of the counter
+    enable_oled_readout();
+    clear_eeprom();
+    tick_count = uncommitted + value;
+    write_to_eeprom();
+    printMeter();
+  }
 }
