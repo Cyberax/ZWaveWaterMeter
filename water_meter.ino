@@ -19,7 +19,7 @@
 #define OLED_READOUT_PIN 20
 #define OLED_COUNTS_TO_SHINE 10000 // 200 seconds
 
-ZUNO_DISABLE(SERVICE_LEDS); // Disable Service LEDs to save battry and remove unwanted blinks
+//ZUNO_DISABLE(SERVICE_LEDS); // Disable Service LEDs to save battry and remove unwanted blinks
 
 // On-demand display
 OLED oled;
