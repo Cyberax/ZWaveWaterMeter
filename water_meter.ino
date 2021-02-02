@@ -3,13 +3,20 @@
 #include "FixedOled.h"
 
 // channel number
-#define ZUNO_CHANNEL_NUMBER_COLD   1
+#define ZUNO_CHANNEL_NUMBER 1
 
 #define EEPROM_ADDR              0x2200
 #define EEPROM_RING_SIZE_ENTRIES 10000
 
+#define SLEEP_TIME_MS 20
+#define NUM_DEBOUNCE 3
+
 // The meter is connected to PIN 18
 #define PIN_TICK 18
+
+// A couple of utility pins
+#define RST_PIN 22
+#define OLED_READOUT_PIN 20
 
 // On-demand display
 OLED oled;
@@ -22,29 +29,33 @@ unsigned long cur_eeprom_offset = 0;
 
 // Current tick start time (high reading start)
 bool tick_started = false;
-unsigned long tick_start_time = 0;
+unsigned int debounce_count = 0;
 
-ZUNO_SETUP_CHANNELS(ZUNO_METER(ZUNO_METER_TYPE_WATER, METER_RESET_ENABLE, 
-    ZUNO_METER_WATER_SCALE_GALLONS, METER_SIZE_FOUR_BYTES, METER_PRECISION_ONE_DECIMAL, getterCold, resetterCold));
+// OLED time to shine
+bool oled_is_on = false;
+unsigned int oled_counts_left = 0;
+
+// Unsolicited report
+unsigned long last_report_millis = 0;
+
+ZUNO_SETUP_CHANNELS(ZUNO_METER(ZUNO_METER_TYPE_WATER, METER_RESET_DISABLE, 
+    ZUNO_METER_WATER_SCALE_GALLONS, METER_SIZE_FOUR_BYTES, METER_PRECISION_ONE_DECIMAL, getter, NULL));
 
 void write_to_eeprom() {
-  cur_eeprom_offset += 1
+  unsigned long buf[3];
+  buf[0] = buf[1] = buf[2] = tick_count;
+  EEPROM.put(EEPROM_ADDR + cur_eeprom_offset*sizeof(buf), buf, sizeof(buf)); 
+ 
+  cur_eeprom_offset += 1;
   if (cur_eeprom_offset == EEPROM_RING_SIZE_ENTRIES) {
     cur_eeprom_offset = 0;
   }
-
-  unsigned int sz = sizeof(tick_count);
-  EEPROM.put(EEPROM_ADDR+(cur_eeprom_offset*3+0)*sz, &tick_count, sz);
-  EEPROM.put(EEPROM_ADDR+(cur_eeprom_offset*3+1)*sz, &tick_count, sz);
-  EEPROM.put(EEPROM_ADDR+(cur_eeprom_offset*3+2)*sz, &tick_count, sz);
 }
 
 unsigned long read_entry(unsigned int idx) {
-  unsigned int sz = sizeof(tick_count);
-  unsigned long v1, v2, v3;
-  EEPROM.put(EEPROM_ADDR+(cur_eeprom_offset*3+0)*sz, &v1, sz);
-  EEPROM.put(EEPROM_ADDR+(cur_eeprom_offset*3+1)*sz, &v2, sz);
-  EEPROM.put(EEPROM_ADDR+(cur_eeprom_offset*3+2)*sz, &v3, sz);
+  unsigned long buf[3];
+  EEPROM.get(EEPROM_ADDR + idx*sizeof(buf), buf, sizeof(buf)); 
+  unsigned long v1 = buf[0], v2 = buf[1], v3 = buf[2];
   if (v1 == v2 && v2 == v3) {
     return v1;
   }
@@ -60,26 +71,47 @@ unsigned long read_entry(unsigned int idx) {
   return 0;
 }
 
-void read_from_eeprom() {
+void init_value_from_eeprom() {
   unsigned long max_val = 0;
-  for(unsigned int i = 0; i < EEPROM_RING_SIZE_ENTRIES; i++) {
+  unsigned long last_reported = 0;
+
+  for(unsigned long i = 0; i < EEPROM_RING_SIZE_ENTRIES; i++) {
      unsigned long cur = read_entry(i);
      if (cur > max_val) {
         max_val = cur;
+	cur_eeprom_offset = i;
+     }
+  
+     unsigned long cur_pct = (i*100/EEPROM_RING_SIZE_ENTRIES);
+     if (cur_pct >= last_reported+5) {
+     	oled.gotoXY(0, 3);
+	oled.print(cur_pct);
+	oled.println("%");
+	last_reported = cur_pct;
      }
   }
   tick_count = max_val;
 }
 
 void clear_eeprom() {
-  unsigned char zero = 0;
-  for(unsigned int i = 0; i < EEPROM_RING_SIZE_ENTRIES*3*sizeof(unsigned long); i++) {
-     EEPROM.put(EEPROM_ADDR + i, &zero, 1);
+  unsigned long last_reported = 0;
+  unsigned long buf[3];
+  buf[0] = buf[1] = buf[2] = 0;
+  
+  oled.clrscr();
+  oled.gotoXY(0,1);
+  oled.println("CLEARING EEPROM");
+  for(unsigned int i = 0; i < EEPROM_RING_SIZE_ENTRIES; i++) {
+     EEPROM.put(EEPROM_ADDR + i*sizeof(buf), buf, sizeof(buf));
+     
+     unsigned long cur_pct = (i*100/EEPROM_RING_SIZE_ENTRIES);
+     if (cur_pct >= last_reported+5) {
+     	oled.gotoXY(0, 3);
+	oled.print(cur_pct);
+	oled.println("%");
+	last_reported = cur_pct;
+     }
   }
-}
-
-bool isGreaterThan(unsigned long t1, unsigned long t2, unsigned long diff) {
-  return false;
 }
 
 void initOled() {
@@ -104,53 +136,95 @@ void initOled() {
   oled.setFont(SmallFont);
   oled.clrscr();
   oled.on();
+  oled.gotoXY(0,1);
 }
 
 void setup() {
   initOled();
-  // Dry contacts of meters connect to these pins
-  zunoExtIntMode(ZUNO_EXT_INT1, RISING);
+  Serial.begin();
+  
+  // Check for reset
+  pinMode(RST_PIN, INPUT_PULLUP);
+  if (!digitalRead(RST_PIN)) {
+    clear_eeprom();
+    zunoReboot();
+  }
+
+  oled.println("Loading...");
+  
+  // Dry contacts of meters connect to this pin
   pinMode(PIN_TICK, INPUT_PULLUP);
 
+  // Utility pin
+  pinMode(OLED_READOUT_PIN, INPUT_PULLUP);
+
   // Get last meter values from EEPROM
-  read_from_eeprom();
+  init_value_from_eeprom();
+  enable_oled_readout();
+}
+
+void enable_oled_readout() {
+  if (!oled_is_on) {
+    oled_is_on = true;
+    initOled();
+    printMeter();
+  }
+  oled_counts_left = 1000;
 }
 
 void printMeter() {
-  //oled.clrscr();
   oled.gotoXY(0,1);
-//  oled.print("Gal: ");
-//  oled.print(my_meter_data.ticks_cold);
-  oled.print(123456789);
+  oled.println("      GALLONS");
+  oled.println("");
+  oled.print(tick_count/10);  
+  oled.print(".");
+  oled.print(tick_count%10);
 }
 
 void loop() {
-/*
-  if (last_reported_data.ticks_cold != my_meter_data.ticks_cold) {
-    last_reported_data.ticks_cold = my_meter_data.ticks_cold;
-    data_updated = true;
-    printMeter();
+  if (!digitalRead(OLED_READOUT_PIN)) {
+    enable_oled_readout();
   }
-    
-  // To save EEPROM from a lot of r/w operation 
-  // write it once in EEPROM_UPDATE_INTERVAL if data was updated
-  if (data_updated && (millis() - last_update_millis) > EEPROM_UPDATE_INTERVAL) {
-      zunoSendReport(ZUNO_CHANNEL_NUMBER_COLD);
-      update_meter_data();
-      data_updated = false;
-      last_update_millis =  millis();
+
+  if (digitalRead(PIN_TICK)) {
+    if (!tick_started) {
+      if (debounce_count == 0) {
+        tick_started = true;
+        debounce_count = NUM_DEBOUNCE;
+      }
+    }
+  } else {
+    if (tick_started) {
+      tick_started = false;
+      tick_count++;
+      write_to_eeprom();
+
+      if (abs(millis() - last_report_millis) > 10000) {
+        zunoSendReport(ZUNO_CHANNEL_NUMBER);
+	last_report_millis = millis();
+      }
+
+      if (oled_is_on) {
+        printMeter();
+      }
+    }
   }
-  delay(1000);
-*/
-  delay(20);
+  
+  if (debounce_count > 0) {
+    debounce_count--;
+  }
+
+  if (oled_is_on) {
+    oled_counts_left--;
+    if (oled_counts_left == 0) {
+      oled.off();
+      oled_is_on = false;
+    }
+  }
+  
+  delay(SLEEP_TIME_MS);
 }
 
-void resetterCold(byte v) {
-  tick_count = 0;
-  clear_eeprom();
-  write_to_eeprom();
-}
-
-unsigned long getterCold(void) {
+unsigned long getter(void) {
   return tick_count;
 }
